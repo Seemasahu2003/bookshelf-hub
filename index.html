@@ -639,6 +639,97 @@
             padding-top: 1rem;
         }
 
+        /* --- PDF.js CANVAS RENDERER (real PDF files) --- */
+        .pdf-canvas-toolbar {
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+            width: 100%;
+            max-width: 900px;
+            padding: 0.6rem 1rem;
+            background: #111a24;
+            border: 1px solid #2c3e50;
+            border-radius: 6px;
+            margin: 0 auto;
+        }
+
+        .pdf-tool-btn {
+            background: #2c3e50;
+            color: #fff;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: 600;
+            white-space: nowrap;
+            transition: background var(--transition-speed);
+            touch-action: manipulation;
+        }
+
+        .pdf-tool-btn:hover {
+            background: var(--accent-color);
+        }
+
+        .pdf-tool-btn:disabled {
+            opacity: 0.35;
+            cursor: not-allowed;
+            background: #2c3e50;
+        }
+
+        .pdf-page-indicator {
+            font-size: 0.85rem;
+            color: #ddd;
+            min-width: 95px;
+            text-align: center;
+        }
+
+        .pdf-zoom-controls {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .pdf-canvas-wrapper {
+            position: relative;
+            width: 100%;
+            max-width: 900px;
+            min-height: 300px;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            margin: 0 auto;
+        }
+
+        .pdf-canvas-wrapper canvas {
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            border-radius: 2px;
+            background: #ffffff;
+            max-width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .pdf-canvas-status {
+            position: absolute;
+            top: 2rem;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #ccc;
+            font-size: 0.95rem;
+            text-align: center;
+            width: 100%;
+            padding: 0 1rem;
+        }
+
+        .pdf-canvas-status.error {
+            color: #ff8a80;
+        }
+
         /* CUSTOM THEME DIALOG MODAL SYSTEM */
         .site-dialog-overlay {
             position: fixed;
@@ -883,6 +974,21 @@
             .about-image img {
                 margin-top: 0;
             }
+            .pdf-canvas-toolbar {
+                gap: 0.4rem;
+                padding: 0.5rem 0.6rem;
+            }
+            .pdf-tool-btn {
+                padding: 0.5rem 0.7rem;
+                font-size: 0.8rem;
+            }
+            .pdf-page-indicator {
+                min-width: 70px;
+                font-size: 0.75rem;
+            }
+            .pdf-body {
+                padding: 1rem 0.5rem;
+            }
         }
     </style>
 </head>
@@ -1058,6 +1164,9 @@
     <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/10.13.0/firebase-database-compat.js"></script>
 
+    <!-- --- PDF.js (canvas-based PDF rendering, consistent across mobile & desktop) --- -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
     <!-- --- EMAILJS SDK (for newsletter subscribe form) --- -->
     <script src="https://cdn.jsdelivr.net/npm/@emailjs/browser@4/dist/email.min.js"></script>
 
@@ -1161,6 +1270,7 @@
 
         firebase.initializeApp(firebaseConfig);
         const commentsDb = firebase.database();
+        const subscribersDb = firebase.database();
 
         // --- EMAILJS SETUP (for newsletter subscribe form + contact form) ---
         (function() {
@@ -1224,6 +1334,14 @@
                 subscriber_email: email,
                 email: email
             }).then(() => {
+                // Save subscriber to Firebase so you can view the list later
+                subscribersDb.ref('subscribers').push({
+                    email: email,
+                    timestamp: Date.now()
+                }).catch((err) => {
+                    console.error('Failed to save subscriber:', err);
+                });
+
                 showSiteDialog('Thank you for joining our readers circle');
                 formEl.reset();
             }).catch((error) => {
@@ -1471,14 +1589,11 @@
                     return;
                 }
 
-                // mode === 'read' -> embed the real PDF in the in-site viewer
+                // mode === 'read' -> render the real PDF with the PDF.js canvas engine
                 document.getElementById('pdfReaderTitle').innerText = `${book.title} — Digital PDF Edition`;
-                const bodyContainer = document.getElementById('pdfReaderBody');
-                bodyContainer.innerHTML = `
-                    <iframe src="${book.pdf}" style="width:100%; max-width:800px; height:85vh; border:none; border-radius:4px; background:#fff;"></iframe>
-                `;
                 document.getElementById('pdfViewerOverlay').classList.add('active');
                 document.body.style.overflow = 'hidden';
+                initPdfCanvasViewer(book.pdf);
                 return;
             }
 
@@ -1518,6 +1633,214 @@
         function closePdfViewer() {
             document.getElementById('pdfViewerOverlay').classList.remove('active');
             document.body.style.overflow = ''; // Release browser scrolling
+            teardownPdfCanvasViewer();
+        }
+
+        // --- 4b. PDF.js CANVAS RENDERING ENGINE ---
+        // Canvas-based rendering (rather than <iframe src="data:...">) is what makes the
+        // reader behave consistently on mobile: iOS/Android browsers frequently refuse to
+        // render PDFs inside an iframe (or force a native "download" prompt instead), while
+        // pdf.js draws every page itself onto a <canvas>, so the result is identical on every
+        // device and never depends on the browser's own PDF plugin.
+        if (typeof pdfjsLib === 'undefined' && typeof window['pdfjs-dist/build/pdf'] !== 'undefined') {
+            window.pdfjsLib = window['pdfjs-dist/build/pdf'];
+        }
+        if (typeof pdfjsLib !== 'undefined') {
+            pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        }
+
+        const pdfCanvasState = {
+            doc: null,
+            currentPage: 1,
+            zoom: 1,          // user-controlled zoom multiplier on top of fit-to-width
+            rendering: false,
+            pendingPage: null,
+            resizeHandler: null,
+            loadToken: 0      // guards against a stale/previous PDF finishing load after the viewer moved on
+        };
+
+        function pdfCanvasMarkup() {
+            return `
+                <div class="pdf-canvas-toolbar">
+                    <button class="pdf-tool-btn" id="pdfPrevBtn" onclick="pdfPrevPage()">‹ Prev</button>
+                    <span class="pdf-page-indicator" id="pdfPageIndicator">Loading…</span>
+                    <button class="pdf-tool-btn" id="pdfNextBtn" onclick="pdfNextPage()">Next ›</button>
+                    <span class="pdf-zoom-controls">
+                        <button class="pdf-tool-btn" onclick="pdfZoomOut()" title="Zoom out">−</button>
+                        <button class="pdf-tool-btn" onclick="pdfZoomIn()" title="Zoom in">+</button>
+                    </span>
+                </div>
+                <div class="pdf-canvas-wrapper" id="pdfCanvasWrapper">
+                    <div class="pdf-canvas-status" id="pdfCanvasStatus">Loading document…</div>
+                    <canvas id="pdfCanvas" style="display:none;"></canvas>
+                </div>
+            `;
+        }
+
+        function initPdfCanvasViewer(pdfSource) {
+            teardownPdfCanvasViewer(); // clear out any previous document/listeners first
+
+            const bodyContainer = document.getElementById('pdfReaderBody');
+            bodyContainer.innerHTML = pdfCanvasMarkup();
+
+            if (typeof pdfjsLib === 'undefined') {
+                setPdfStatus('Could not load the PDF renderer. Please check your connection and try again.', true);
+                return;
+            }
+
+            const myLoadToken = ++pdfCanvasState.loadToken;
+            pdfCanvasState.currentPage = 1;
+            pdfCanvasState.zoom = 1;
+            updatePdfPageControls();
+
+            pdfjsLib.getDocument(pdfSource).promise.then(doc => {
+                if (myLoadToken !== pdfCanvasState.loadToken) return; // viewer was closed/reopened meanwhile
+                pdfCanvasState.doc = doc;
+                updatePdfPageControls();
+                queueRenderPdfPage(pdfCanvasState.currentPage);
+
+                // Re-fit the page whenever the viewport size changes (rotation, resize, split-screen, etc.)
+                pdfCanvasState.resizeHandler = debouncePdf(() => {
+                    if (pdfCanvasState.doc) queueRenderPdfPage(pdfCanvasState.currentPage);
+                }, 200);
+                window.addEventListener('resize', pdfCanvasState.resizeHandler);
+                window.addEventListener('orientationchange', pdfCanvasState.resizeHandler);
+            }).catch(err => {
+                if (myLoadToken !== pdfCanvasState.loadToken) return;
+                console.error('PDF load error:', err);
+                setPdfStatus('This document could not be loaded.', true);
+            });
+        }
+
+        function teardownPdfCanvasViewer() {
+            pdfCanvasState.loadToken++; // invalidate any in-flight load/render for the old document
+            pdfCanvasState.doc = null;
+            pdfCanvasState.currentPage = 1;
+            pdfCanvasState.zoom = 1;
+            pdfCanvasState.rendering = false;
+            pdfCanvasState.pendingPage = null;
+            if (pdfCanvasState.resizeHandler) {
+                window.removeEventListener('resize', pdfCanvasState.resizeHandler);
+                window.removeEventListener('orientationchange', pdfCanvasState.resizeHandler);
+                pdfCanvasState.resizeHandler = null;
+            }
+        }
+
+        function setPdfStatus(message, isError) {
+            const status = document.getElementById('pdfCanvasStatus');
+            const canvas = document.getElementById('pdfCanvas');
+            if (!status) return;
+            status.textContent = message;
+            status.style.display = message ? 'block' : 'none';
+            status.classList.toggle('error', !!isError);
+            if (canvas) canvas.style.display = message ? 'none' : 'block';
+        }
+
+        function queueRenderPdfPage(num) {
+            if (pdfCanvasState.rendering) {
+                pdfCanvasState.pendingPage = num;
+            } else {
+                renderPdfPage(num);
+            }
+        }
+
+        function renderPdfPage(num) {
+            if (!pdfCanvasState.doc) return;
+            pdfCanvasState.rendering = true;
+            const myLoadToken = pdfCanvasState.loadToken;
+
+            pdfCanvasState.doc.getPage(num).then(page => {
+                if (myLoadToken !== pdfCanvasState.loadToken) return;
+
+                const wrapper = document.getElementById('pdfCanvasWrapper');
+                const canvas = document.getElementById('pdfCanvas');
+                if (!wrapper || !canvas) return;
+
+                // Fit the page to the available width, then apply the user's zoom on top.
+                // Recomputed on every render so rotating a phone or resizing a window
+                // always produces a crisp, correctly-sized page rather than a stretched one.
+                const containerWidth = Math.max(wrapper.clientWidth, 280);
+                const unscaledViewport = page.getViewport({ scale: 1 });
+                const fitScale = (containerWidth / unscaledViewport.width) * pdfCanvasState.zoom;
+                const viewport = page.getViewport({ scale: fitScale });
+
+                // Render at the device's actual pixel density so text stays sharp on
+                // high-DPI phone screens instead of looking blurry/pixelated.
+                const outputScale = window.devicePixelRatio || 1;
+                canvas.width = Math.floor(viewport.width * outputScale);
+                canvas.height = Math.floor(viewport.height * outputScale);
+                canvas.style.width = Math.floor(viewport.width) + 'px';
+                canvas.style.height = Math.floor(viewport.height) + 'px';
+
+                const ctx = canvas.getContext('2d');
+                const transform = outputScale !== 1 ? [outputScale, 0, 0, outputScale, 0, 0] : null;
+
+                return page.render({ canvasContext: ctx, viewport, transform }).promise.then(() => {
+                    if (myLoadToken !== pdfCanvasState.loadToken) return;
+                    setPdfStatus('');
+                });
+            }).then(() => {
+                if (myLoadToken !== pdfCanvasState.loadToken) return;
+                pdfCanvasState.rendering = false;
+                if (pdfCanvasState.pendingPage !== null) {
+                    const next = pdfCanvasState.pendingPage;
+                    pdfCanvasState.pendingPage = null;
+                    renderPdfPage(next);
+                }
+            }).catch(err => {
+                pdfCanvasState.rendering = false;
+                if (myLoadToken !== pdfCanvasState.loadToken) return;
+                console.error('PDF page render error:', err);
+                setPdfStatus('This page could not be displayed.', true);
+            });
+        }
+
+        function updatePdfPageControls() {
+            const indicator = document.getElementById('pdfPageIndicator');
+            const prevBtn = document.getElementById('pdfPrevBtn');
+            const nextBtn = document.getElementById('pdfNextBtn');
+            if (!indicator) return;
+
+            const total = pdfCanvasState.doc ? pdfCanvasState.doc.numPages : null;
+            indicator.textContent = total ? `Page ${pdfCanvasState.currentPage} of ${total}` : 'Loading…';
+            if (prevBtn) prevBtn.disabled = pdfCanvasState.currentPage <= 1;
+            if (nextBtn) nextBtn.disabled = !total || pdfCanvasState.currentPage >= total;
+        }
+
+        function pdfPrevPage() {
+            if (!pdfCanvasState.doc || pdfCanvasState.currentPage <= 1) return;
+            pdfCanvasState.currentPage--;
+            updatePdfPageControls();
+            queueRenderPdfPage(pdfCanvasState.currentPage);
+            document.getElementById('pdfCanvasWrapper')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        }
+
+        function pdfNextPage() {
+            if (!pdfCanvasState.doc || pdfCanvasState.currentPage >= pdfCanvasState.doc.numPages) return;
+            pdfCanvasState.currentPage++;
+            updatePdfPageControls();
+            queueRenderPdfPage(pdfCanvasState.currentPage);
+            document.getElementById('pdfCanvasWrapper')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        }
+
+        function pdfZoomIn() {
+            if (!pdfCanvasState.doc) return;
+            pdfCanvasState.zoom = Math.min(pdfCanvasState.zoom + 0.2, 3);
+            queueRenderPdfPage(pdfCanvasState.currentPage);
+        }
+
+        function pdfZoomOut() {
+            if (!pdfCanvasState.doc) return;
+            pdfCanvasState.zoom = Math.max(pdfCanvasState.zoom - 0.2, 0.4);
+            queueRenderPdfPage(pdfCanvasState.currentPage);
+        }
+
+        function debouncePdf(fn, wait) {
+            let timer = null;
+            return function (...args) {
+                clearTimeout(timer);
+                timer = setTimeout(() => fn.apply(this, args), wait);
+            };
         }
 
         // Custom Pop-up Controls
